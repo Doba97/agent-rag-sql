@@ -1,0 +1,114 @@
+"""Tests de la recherche et des mesures, avec un petit corpus et de faux embeddings."""
+
+import numpy as np
+import pytest
+
+from src.evaluation import evaluate_retriever, first_hit_rank, hit_at_k, reciprocal_rank
+from src.retrieval import BM25Retriever, DenseRetriever, HybridRetriever, rrf_fuse, tokenize
+
+PASSAGES = [
+    {"id": "p1", "text": "Ulysses S. Grant was elected president as a Republican in 1868."},
+    {"id": "p2", "text": "Kangaroos live in Australia and can hop very fast."},
+    {"id": "p3", "text": "Finland has a life expectancy of 75 years for men."},
+    {"id": "p4", "text": "Turtles are divided into three suborders."},
+]
+
+# Faux embeddings : chaque passage parle d'un « thème » (une dimension).
+THEMES = {"president": 0, "kangaroo": 1, "finland": 2, "turtle": 3}
+
+
+def fake_embed(text: str) -> np.ndarray:
+    vector = np.zeros(4)
+    for word, dim in THEMES.items():
+        if word in text.lower():
+            vector[dim] = 1.0
+    norm = np.linalg.norm(vector)
+    return vector / norm if norm else vector
+
+
+def fake_embed_passages(texts):
+    return np.array([fake_embed(t) for t in texts])
+
+
+def test_tokenize():
+    assert tokenize("Grant, elected in 1868!") == ["grant", "elected", "in", "1868"]
+
+
+def test_bm25_finds_passage_with_rare_words():
+    results = BM25Retriever(PASSAGES).search("When was Grant elected?", k=2)
+    assert results[0][0] == "p1"
+    assert len(results) == 2
+
+
+def test_dense_finds_passage_by_theme():
+    dense = DenseRetriever.from_passages(PASSAGES, embed_passages_fn=fake_embed_passages, embed_query_fn=fake_embed)
+    assert dense.search("Which kangaroo is the fastest?", k=1)[0][0] == "p2"
+
+
+def test_dense_cache_is_reused(tmp_path):
+    cache = tmp_path / "vectors.npz"
+    DenseRetriever.from_passages(PASSAGES, cache, fake_embed_passages, fake_embed)
+
+    def must_not_be_called(texts):
+        raise AssertionError("les vecteurs auraient dû être relus depuis le cache")
+
+    dense = DenseRetriever.from_passages(PASSAGES, cache, must_not_be_called, fake_embed)
+    assert dense.search("turtle", k=1)[0][0] == "p4"
+
+
+def test_dense_cache_is_reused_for_a_subset(tmp_path):
+    cache = tmp_path / "vectors.npz"
+    DenseRetriever.from_passages(PASSAGES, cache, fake_embed_passages, fake_embed)
+
+    def must_not_be_called(texts):
+        raise AssertionError("les vecteurs auraient dû être relus depuis le cache")
+
+    subset = [PASSAGES[3], PASSAGES[0]]  # ordre différent, passages retirés
+    dense = DenseRetriever.from_passages(subset, cache, must_not_be_called, fake_embed)
+    assert dense.ids == ["p4", "p1"]
+    assert dense.search("turtle", k=1)[0][0] == "p4"
+    assert dense.search("president", k=1)[0][0] == "p1"
+
+
+def test_dense_rejects_mismatched_sizes():
+    with pytest.raises(ValueError):
+        DenseRetriever(["p1", "p2"], np.zeros((3, 4)), fake_embed)
+
+
+def test_rrf_rewards_agreement_between_rankings():
+    fused = rrf_fuse([["a", "b", "c"], ["b", "c", "a"]], c=60)
+    assert fused[0][0] == "b"  # 2e puis 1er : meilleur total
+    assert fused[0][1] == pytest.approx(1 / 62 + 1 / 61)
+
+
+def test_rrf_keeps_passages_found_by_one_method_only():
+    fused = dict(rrf_fuse([["a"], ["b"]]))
+    assert set(fused) == {"a", "b"}
+
+
+def test_hybrid_returns_k_results():
+    bm25 = BM25Retriever(PASSAGES)
+    dense = DenseRetriever.from_passages(PASSAGES, embed_passages_fn=fake_embed_passages, embed_query_fn=fake_embed)
+    results = HybridRetriever([bm25, dense], depth=4).search("Grant president 1868", k=2)
+    assert len(results) == 2 and results[0][0] == "p1"
+
+
+def test_first_hit_rank_and_metrics():
+    texts = ["nothing here", "elected in 1868", "also 1868"]
+    rank = first_hit_rank("1868", texts)
+    assert rank == 2
+    assert hit_at_k(rank, 1) == 0.0 and hit_at_k(rank, 3) == 1.0
+    assert reciprocal_rank(rank) == 0.5
+    assert reciprocal_rank(None) == 0.0 and hit_at_k(None, 10) == 0.0
+
+
+def test_evaluate_retriever_averages_over_questions():
+    questions = [
+        {"id": "q1", "question": "When was Grant elected president?", "answer": "1868"},
+        {"id": "q2", "question": "How many suborders do turtles have?", "answer": "three"},
+    ]
+    texts = {p["id"]: p["text"] for p in PASSAGES}
+    result = evaluate_retriever(BM25Retriever(PASSAGES), questions, texts, ks=(1, 3))
+    assert result["scores"]["Hit@1"] == 1.0
+    assert result["scores"]["MRR@3"] == 1.0
+    assert len(result["details"]) == 2
