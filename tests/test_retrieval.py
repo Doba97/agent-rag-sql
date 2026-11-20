@@ -34,6 +34,24 @@ def test_tokenize():
     assert tokenize("Grant, elected in 1868!") == ["grant", "elected", "in", "1868"]
 
 
+def test_tokenize_with_stemming_merges_word_forms():
+    assert tokenize("Monroe died", stem=True) == tokenize("monroe dies", stem=True)
+
+
+def test_bm25_with_stemming_matches_other_word_forms():
+    passages = PASSAGES + [
+        {"id": "a", "text": "Monroe died in New York in 1831."},
+        {"id": "b", "text": "Monroe was the fifth president of the country."},
+    ]
+    question = "When did Monroe die?"
+    # Sans racinisation, "die" ne correspond pas à "died" : les deux passages sur Monroe sont à égalité.
+    plain = dict(BM25Retriever(passages).search(question, k=6))
+    assert plain["a"] == pytest.approx(plain["b"], rel=0.2)
+    # Avec racinisation, "die" retrouve "died" : le bon passage passe nettement devant.
+    stemmed = dict(BM25Retriever(passages, stem=True).search(question, k=6))
+    assert stemmed["a"] > 1.5 * stemmed["b"]
+
+
 def test_bm25_finds_passage_with_rare_words():
     results = BM25Retriever(PASSAGES).search("When was Grant elected?", k=2)
     assert results[0][0] == "p1"
@@ -68,6 +86,19 @@ def test_dense_cache_is_reused_for_a_subset(tmp_path):
     assert dense.ids == ["p4", "p1"]
     assert dense.search("turtle", k=1)[0][0] == "p4"
     assert dense.search("president", k=1)[0][0] == "p1"
+
+
+def test_dense_encodes_each_question_once():
+    calls = []
+
+    def counting_embed(question):
+        calls.append(question)
+        return fake_embed(question)
+
+    dense = DenseRetriever.from_passages(PASSAGES, embed_passages_fn=fake_embed_passages, embed_query_fn=counting_embed)
+    dense.search("turtle", k=1)
+    dense.search("turtle", k=3)
+    assert calls == ["turtle"]
 
 
 def test_dense_rejects_mismatched_sizes():

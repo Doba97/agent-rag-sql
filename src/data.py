@@ -6,6 +6,7 @@ Fichiers produits dans data/ :
   wiki_passages.jsonl     les passages Wikipedia (corpus de la recherche)
   wiki_tune.jsonl         questions sur les documents, pour régler le système
   wiki_test.jsonl         questions sur les documents, à n'utiliser qu'à la fin
+  wiki_reserve.jsonl      questions sur les documents non tirées (réglage supplémentaire de la recherche)
   spider_tune.jsonl       questions SQL (Spider), pour régler le système
   spider_test.jsonl       questions SQL (Spider), à n'utiliser qu'à la fin
   router_test.jsonl       les deux jeux de test mélangés, étiquetés "documents" ou "sql"
@@ -79,6 +80,12 @@ def split_tune_test(items: list, n_tune: int = N_TUNE, n_test: int = N_TEST, see
     return shuffled[:n_tune], shuffled[n_tune : n_tune + n_test]
 
 
+def remaining(items: list[dict], *used: list[dict]) -> list[dict]:
+    """Éléments qui ne figurent dans aucun des ensembles déjà tirés (comparaison par id)."""
+    used_ids = {row["id"] for group in used for row in group}
+    return [row for row in items if row["id"] not in used_ids]
+
+
 def build_router_set(doc_questions: list[dict], sql_questions: list[dict], seed: int = SEED) -> list[dict]:
     """Mélange les questions des deux jeux, chacune avec l'outil attendu."""
     rows = [{"id": q["id"], "question": q["question"], "expected_tool": "documents"} for q in doc_questions]
@@ -149,14 +156,17 @@ def prepare_documents() -> dict:
             questions.append({"id": f"wiki-q{row['id']}", "question": question, "answer": answer})
 
     tune, test = split_tune_test(questions)
+    reserve = remaining(questions, tune, test)
     write_jsonl(tune, DATA_DIR / "wiki_tune.jsonl")
     write_jsonl(test, DATA_DIR / "wiki_test.jsonl")
+    write_jsonl(reserve, DATA_DIR / "wiki_reserve.jsonl")
     return {
         "passages": len(passages),
         "questions_total": len(qa),
         "questions_gardees": len(questions),
         "reglage": len(tune),
         "test": len(test),
+        "reserve": len(reserve),
     }
 
 

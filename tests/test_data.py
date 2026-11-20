@@ -11,6 +11,7 @@ from src.data import (
     is_usable_doc_question,
     normalize,
     read_jsonl,
+    remaining,
     run_query_readonly,
     split_tune_test,
     write_jsonl,
@@ -83,3 +84,11 @@ def test_clean_text_repairs_garbled_accents():
     assert clean_text("SÃ¶derby, Sweden ") == "Söderby, Sweden"
     assert clean_text("TimiÈ™oara") == "Timișoara"
     assert clean_text("déjà vu") == "déjà vu"
+
+
+def test_remaining_excludes_already_drawn_items():
+    items = [{"id": str(i)} for i in range(10)]
+    tune, test = split_tune_test(items, 2, 3)
+    reserve = remaining(items, tune, test)
+    assert len(reserve) == 5
+    assert not {r["id"] for r in reserve} & {r["id"] for r in tune + test}

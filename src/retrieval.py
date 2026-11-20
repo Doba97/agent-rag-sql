@@ -11,22 +11,41 @@ import numpy as np
 from src.data import normalize
 
 
-def tokenize(text: str) -> list[str]:
-    """Découpe un texte en mots, sans majuscules ni ponctuation."""
-    return normalize(text).split()
+_stemmer = None
+
+
+def stem_words(words: list[str]) -> list[str]:
+    """Réduit chaque mot anglais à sa racine : "died" et "dies" deviennent "die"."""
+    global _stemmer
+    if _stemmer is None:
+        import snowballstemmer
+
+        _stemmer = snowballstemmer.stemmer("english")
+    return _stemmer.stemWords(words)
+
+
+def tokenize(text: str, stem: bool = False) -> list[str]:
+    """Découpe un texte en mots, sans majuscules ni ponctuation, avec racinisation si demandé."""
+    words = normalize(text).split()
+    return stem_words(words) if stem else words
 
 
 class BM25Retriever:
-    """Recherche par mots-clés : favorise les passages qui contiennent les mots rares de la question."""
+    """Recherche par mots-clés : favorise les passages qui contiennent les mots rares de la question.
 
-    def __init__(self, passages: list[dict]):
+    stem=True applique la racinisation à la question et aux passages, pour que
+    "die" dans la question retrouve "died" dans un passage.
+    """
+
+    def __init__(self, passages: list[dict], stem: bool = False):
         from rank_bm25 import BM25Okapi
 
+        self.stem = stem
         self.ids = [p["id"] for p in passages]
-        self.bm25 = BM25Okapi([tokenize(p["text"]) for p in passages])
+        self.bm25 = BM25Okapi([tokenize(p["text"], stem) for p in passages])
 
     def search(self, question: str, k: int = 10) -> list[tuple[str, float]]:
-        scores = self.bm25.get_scores(tokenize(question))
+        scores = self.bm25.get_scores(tokenize(question, self.stem))
         best = np.argsort(-scores)[:k]
         return [(self.ids[i], float(scores[i])) for i in best]
 
@@ -44,6 +63,7 @@ class DenseRetriever:
         self.ids = ids
         self.vectors = vectors
         self.embed_query = embed_query_fn
+        self._query_cache: dict[str, np.ndarray] = {}  # une question n'est encodée qu'une fois
 
     @classmethod
     def from_passages(cls, passages: list[dict], cache_path: Path | None = None, embed_passages_fn=None, embed_query_fn=None):
@@ -70,7 +90,9 @@ class DenseRetriever:
         return cls(ids, vectors, embed_query_fn)
 
     def search(self, question: str, k: int = 10) -> list[tuple[str, float]]:
-        scores = self.vectors @ self.embed_query(question)
+        if question not in self._query_cache:
+            self._query_cache[question] = self.embed_query(question)
+        scores = self.vectors @ self._query_cache[question]
         best = np.argsort(-scores)[:k]
         return [(self.ids[i], float(scores[i])) for i in best]
 
