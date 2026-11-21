@@ -109,6 +109,15 @@ def read_jsonl(path: Path) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
+MIN_PASSAGE_WORDS = 5
+
+
+def load_passages(min_words: int = MIN_PASSAGE_WORDS, path: Path | None = None) -> list[dict]:
+    """Lit les passages et retire ceux de moins de `min_words` mots (légendes, titres, tailles d'images)."""
+    passages = read_jsonl(path or DATA_DIR / "wiki_passages.jsonl")
+    return [p for p in passages if len(p["text"].split()) >= min_words]
+
+
 def sqlite_path(db_id: str, root: Path = SPIDER_DIR) -> Path:
     return root / "database" / db_id / f"{db_id}.sqlite"
 

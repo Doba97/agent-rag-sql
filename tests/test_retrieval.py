@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from src.evaluation import evaluate_retriever, first_hit_rank, hit_at_k, reciprocal_rank
-from src.retrieval import BM25Retriever, DenseRetriever, HybridRetriever, rrf_fuse, tokenize
+from src.retrieval import BM25Retriever, DenseRetriever, HybridRetriever, RerankRetriever, rrf_fuse, tokenize
 
 PASSAGES = [
     {"id": "p1", "text": "Ulysses S. Grant was elected president as a Republican in 1868."},
@@ -143,3 +143,49 @@ def test_evaluate_retriever_averages_over_questions():
     assert result["scores"]["Hit@1"] == 1.0
     assert result["scores"]["MRR@3"] == 1.0
     assert len(result["details"]) == 2
+
+
+class FixedRetriever:
+    def __init__(self, ids):
+        self.ids = ids
+
+    def search(self, question, k=10):
+        return [(pid, 1.0 / (i + 1)) for i, pid in enumerate(self.ids[:k])]
+
+
+def test_rerank_reorders_candidates_by_new_scores():
+    texts = {p["id"]: p["text"] for p in PASSAGES}
+
+    def score_fn(question, candidate_texts):
+        # Le faux reranker préfère les passages qui contiennent "1868".
+        return [1.0 if "1868" in t else 0.0 for t in candidate_texts]
+
+    reranker = RerankRetriever(FixedRetriever(["p2", "p3", "p1", "p4"]), texts, score_fn, candidates=4)
+    assert reranker.search("When was Grant elected?", k=1)[0][0] == "p1"
+
+
+def test_rerank_only_reads_the_candidates():
+    texts = {p["id"]: p["text"] for p in PASSAGES}
+    seen = []
+
+    def score_fn(question, candidate_texts):
+        seen.append(len(candidate_texts))
+        return [0.0] * len(candidate_texts)
+
+    reranker = RerankRetriever(FixedRetriever(["p1", "p2", "p3", "p4"]), texts, score_fn, candidates=2)
+    results = reranker.search("question", k=10)
+    assert seen == [2] and len(results) == 2
+
+
+def test_rerank_scores_each_question_once():
+    texts = {p["id"]: p["text"] for p in PASSAGES}
+    calls = []
+
+    def score_fn(question, candidate_texts):
+        calls.append(question)
+        return [0.0] * len(candidate_texts)
+
+    reranker = RerankRetriever(FixedRetriever(["p1", "p2"]), texts, score_fn, candidates=2)
+    reranker.search("q", k=1)
+    reranker.search("q", k=2)
+    assert calls == ["q"]

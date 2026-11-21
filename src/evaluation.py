@@ -4,7 +4,9 @@ Un passage est considéré comme « bon » s'il contient la réponse attendue
 (mots entiers, sans tenir compte des majuscules ni de la ponctuation).
 """
 
-from src.data import answer_in_text
+from collections import Counter
+
+from src.data import answer_in_text, normalize
 
 
 def first_hit_rank(answer: str, retrieved_texts: list[str]) -> int | None:
@@ -42,3 +44,32 @@ def evaluate_retriever(retriever, questions: list[dict], passage_text: dict[str,
     scores = {f"Hit@{k}": sum(hit_at_k(d["rank"], k) for d in details) / n for k in ks}
     scores[f"MRR@{depth}"] = sum(reciprocal_rank(d["rank"]) for d in details) / n
     return {"scores": scores, "details": details}
+
+
+ARTICLES = {"a", "an", "the"}
+
+
+def answer_tokens(text: str) -> list[str]:
+    """Mots d'une réponse, sans majuscules, ponctuation ni articles anglais."""
+    return [w for w in normalize(text).split() if w not in ARTICLES]
+
+
+def contains_answer(prediction: str, gold: str) -> bool:
+    """Vrai si tous les mots de la réponse attendue apparaissent, dans l'ordre et à la suite, dans la réponse donnée.
+
+    Exemple : "Federalist Party" contient "The Federalist Party" (les articles sont ignorés).
+    """
+    pred, ref = answer_tokens(prediction), answer_tokens(gold)
+    if not ref:
+        return False
+    return any(pred[i : i + len(ref)] == ref for i in range(len(pred) - len(ref) + 1))
+
+
+def token_f1(prediction: str, gold: str) -> float:
+    """F1 sur les mots (mesure du jeu SQuAD) : récompense une réponse partiellement juste."""
+    pred, ref = answer_tokens(prediction), answer_tokens(gold)
+    common = sum((Counter(pred) & Counter(ref)).values())
+    if common == 0:
+        return 0.0
+    precision, recall = common / len(pred), common / len(ref)
+    return 2 * precision * recall / (precision + recall)

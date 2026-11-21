@@ -3,6 +3,10 @@
 Sur les questions de la réserve (plus nombreuses, donc résultats plus fiables) :
     python -m src.eval_retrieval --questions reserve
 
+Avec reranking des 10 premiers passages de la recherche combinée :
+    python -m src.eval_retrieval --questions reserve --rerank minilm
+    python -m src.eval_retrieval --questions reserve --rerank minilm bge --candidats 10
+
 Lancer avec :  python -m src.eval_retrieval
 Par défaut, les passages de moins de 5 mots sont retirés. Pour tous les garder :
     python -m src.eval_retrieval --min-mots 1
@@ -16,11 +20,12 @@ Produit :
 
 import argparse
 import sys
+import time
 
 from src.config import EMBEDDING_MODEL, ROOT_DIR
 from src.data import DATA_DIR, read_jsonl, write_jsonl
 from src.evaluation import evaluate_retriever
-from src.retrieval import BM25Retriever, DenseRetriever, HybridRetriever
+from src.retrieval import RERANKERS, BM25Retriever, DenseRetriever, HybridRetriever, RerankRetriever
 
 KS = (1, 3, 5, 10)
 SHORT_PASSAGE_WORDS = 5
@@ -56,6 +61,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--min-mots", type=int, default=5, help="retire les passages plus courts que ce nombre de mots")
     parser.add_argument("--questions", choices=list(QUESTION_SETS), default="tune", help="jeu de questions à utiliser")
+    parser.add_argument("--rerank", nargs="*", choices=list(RERANKERS), default=[], help="rerankers à tester")
+    parser.add_argument("--candidats", type=int, default=10, help="nombre de passages relus par le reranker")
+    parser.add_argument("--limit", type=int, default=None, help="n'utiliser que les N premières questions (essai)")
     args = parser.parse_args()
     min_words, question_set = args.min_mots, args.questions
 
@@ -63,25 +71,34 @@ def main() -> None:
     describe_short_passages(passages)
     passages = [p for p in passages if len(p["text"].split()) >= min_words]
     print(f"Passages utilisés : {len(passages)}")
-    questions = read_jsonl(DATA_DIR / f"wiki_{question_set}.jsonl")
+    questions = read_jsonl(DATA_DIR / f"wiki_{question_set}.jsonl")[: args.limit]
     passage_text = {p["id"]: p["text"] for p in passages}
 
     print("\nPréparation des moteurs de recherche...")
     bm25 = BM25Retriever(passages)
     bm25_stem = BM25Retriever(passages, stem=True)
     dense = DenseRetriever.from_passages(passages, cache_path=DATA_DIR / "passage_vectors.npz")
+    best = HybridRetriever([bm25_stem, dense])
     retrievers = {
         "BM25 (mots-clés)": bm25,
         "BM25 + racinisation": bm25_stem,
         "Embeddings (sens)": dense,
         "Combinée (RRF)": HybridRetriever([bm25, dense]),
-        "Combinée (RRF) + racinisation": HybridRetriever([bm25_stem, dense]),
+        "Combinée (RRF) + racinisation": best,
     }
+    for key in args.rerank:
+        name = f"Combinée + racinisation + reranking {key} ({args.candidats} candidats)"
+        retrievers[name] = RerankRetriever.from_model(best, passage_text, RERANKERS[key], args.candidats)
 
-    results = {name: evaluate_retriever(r, questions, passage_text, KS) for name, r in retrievers.items()}
+    results = {}
+    for name, retriever in retrievers.items():
+        start = time.perf_counter()
+        results[name] = evaluate_retriever(retriever, questions, passage_text, KS)
+        print(f"{name} : {time.perf_counter() - start:.0f} s")
 
     table = to_markdown(results, len(questions), len(passages), min_words, QUESTION_SETS[question_set])
-    suffix = "" if min_words == 5 else f"_min{min_words}"
+    suffix = ("" if min_words == 5 else f"_min{min_words}") + (f"_{args.limit}" if args.limit else "")
+    suffix += "".join(f"_{key}" for key in args.rerank)
     print("\n" + table)
     results_dir = ROOT_DIR / "results"
     results_dir.mkdir(exist_ok=True)

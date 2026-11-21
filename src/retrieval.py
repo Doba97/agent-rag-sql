@@ -4,6 +4,7 @@ Chaque moteur de recherche a la même méthode :
     search(question, k) -> liste de (id du passage, score), du meilleur au moins bon.
 """
 
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -122,3 +123,69 @@ class HybridRetriever:
     def search(self, question: str, k: int = 10) -> list[tuple[str, float]]:
         rankings = [[pid for pid, _ in r.search(question, self.depth)] for r in self.retrievers]
         return rrf_fuse(rankings, self.c)[:k]
+
+
+RERANKERS = {
+    "minilm": "cross-encoder/ms-marco-MiniLM-L-6-v2",  # petit et rapide
+    "bge": "BAAI/bge-reranker-base",  # plus gros, souvent plus précis, environ 5 fois plus lent
+}
+
+
+@lru_cache(maxsize=2)
+def load_cross_encoder(model_name: str):
+    """Charge le reranker une seule fois, à la première utilisation."""
+    from sentence_transformers import CrossEncoder
+
+    return CrossEncoder(model_name)
+
+
+class RerankRetriever:
+    """Deuxième tri : relit chaque passage candidat AVEC la question et le renote.
+
+    1. Le moteur de base (ex. la recherche combinée) donne `candidates` passages.
+    2. Un cross-encoder note chaque couple (question, passage) : plus lent mais plus précis,
+       car il lit la question et le passage ensemble au lieu de comparer deux vecteurs.
+    3. On renvoie les passages dans l'ordre de ces nouvelles notes.
+
+    Le reranking ne fait que réordonner les candidats : Hit@candidates ne peut pas changer.
+    """
+
+    def __init__(self, base, passage_text: dict[str, str], score_fn, candidates: int = 10):
+        self.base = base
+        self.passage_text = passage_text
+        self.score_fn = score_fn  # score_fn(question, [textes]) -> liste de notes
+        self.candidates = candidates
+        self._cache: dict[str, list[tuple[str, float]]] = {}
+
+    @classmethod
+    def from_model(cls, base, passage_text: dict[str, str], model_name: str, candidates: int = 10):
+        model = load_cross_encoder(model_name)
+
+        def score_fn(question, texts):
+            return model.predict([(question, text) for text in texts])
+
+        return cls(base, passage_text, score_fn, candidates)
+
+    def search(self, question: str, k: int = 10) -> list[tuple[str, float]]:
+        if question not in self._cache:
+            ids = [pid for pid, _ in self.base.search(question, self.candidates)]
+            scores = self.score_fn(question, [self.passage_text[pid] for pid in ids])
+            ranked = sorted(zip(ids, (float(x) for x in scores)), key=lambda item: item[1], reverse=True)
+            self._cache[question] = ranked
+        return self._cache[question][:k]
+
+
+def build_hybrid_retriever(
+    passages: list[dict], cache_path: Path | None = None, rerank: str | None = None, candidates: int = 10
+):
+    """Méthode retenue à l'étape 4 : BM25 avec racinisation + recherche dense, fusionnées par RRF.
+
+    rerank="minilm" ou "bge" ajoute un reranking des `candidates` premiers passages.
+    """
+    bm25 = BM25Retriever(passages, stem=True)
+    dense = DenseRetriever.from_passages(passages, cache_path=cache_path)
+    hybrid = HybridRetriever([bm25, dense])
+    if rerank is None:
+        return hybrid
+    passage_text = {p["id"]: p["text"] for p in passages}
+    return RerankRetriever.from_model(hybrid, passage_text, RERANKERS[rerank], candidates)
